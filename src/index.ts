@@ -10,7 +10,7 @@ import type {
 } from 'fastify';
 import type { FastifySerializerCompiler } from 'fastify/types/schema';
 import type { ZodAny, ZodTypeAny, z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
+import { Options, zodToJsonSchema } from 'zod-to-json-schema';
 
 import { ResponseValidationError } from './ResponseValidationError';
 
@@ -63,7 +63,7 @@ export const createJsonSchemaTransform = ({ skipList }: { skipList: readonly str
     for (const prop in zodSchemas) {
       const zodSchema = zodSchemas[prop];
       if (zodSchema) {
-        transformed[prop] = zodToJsonSchema(zodSchema, zodToJsonSchemaOptions);
+        transformed[prop] = replaceAnyOfWithOneOf(zodToJsonSchema(zodSchema, zodToJsonSchemaOptions));
       }
     }
 
@@ -80,7 +80,7 @@ export const createJsonSchemaTransform = ({ skipList }: { skipList: readonly str
           schema as any,
           zodToJsonSchemaOptions,
         );
-        transformed.response[prop] = transformedResponse;
+        transformed.response[prop] = replaceAnyOfWithOneOf(transformedResponse);
       }
     }
 
@@ -95,20 +95,43 @@ export const createJsonSchemaTransform = ({ skipList }: { skipList: readonly str
   };
 };
 
+function replaceAnyOfWithOneOf(obj: any): any {
+  if (obj instanceof Array) {
+    return (obj as any[]).map((s) => replaceAnyOfWithOneOf(s));
+  }
+  if ('anyOf' in obj) {
+    const anyOf = replaceAnyOfWithOneOf(obj.anyOf);
+    obj.oneOf = anyOf;
+    delete obj.anyOf;
+  }
+  if (obj.type === 'object' && obj.properties) {
+    const properties = {} as any;
+    for (const [k, v] of Object.entries(obj.properties)) {
+      properties[k] = replaceAnyOfWithOneOf(v);
+    }
+    obj.properties = properties;
+  }
+  if (obj.type === 'array' && obj.items) {
+    const items = replaceAnyOfWithOneOf(obj.items);
+    obj.items = items;
+  }
+  return obj;
+}
+
 export const jsonSchemaTransform = createJsonSchemaTransform({
   skipList: defaultSkipList,
 });
 
 export const validatorCompiler: FastifySchemaCompiler<ZodAny> =
   ({ schema }) =>
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (data): any => {
-    try {
-      return { value: schema.parse(data) };
-    } catch (error) {
-      return { error };
-    }
-  };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (data): any => {
+      try {
+        return { value: schema.parse(data) };
+      } catch (error) {
+        return { error };
+      }
+    };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function hasOwnProperty<T, K extends PropertyKey>(obj: T, prop: K): obj is T & Record<K, any> {
@@ -127,16 +150,16 @@ function resolveSchema(maybeSchema: ZodAny | { properties: ZodAny }): Pick<ZodAn
 
 export const serializerCompiler: FastifySerializerCompiler<ZodAny | { properties: ZodAny }> =
   ({ schema: maybeSchema, method, url }) =>
-  (data) => {
-    const schema: Pick<ZodAny, 'safeParse'> = resolveSchema(maybeSchema);
+    (data) => {
+      const schema: Pick<ZodAny, 'safeParse'> = resolveSchema(maybeSchema);
 
-    const result = schema.safeParse(data);
-    if (result.success) {
-      return JSON.stringify(result.data);
-    }
+      const result = schema.safeParse(data);
+      if (result.success) {
+        return JSON.stringify(result.data);
+      }
 
-    throw new ResponseValidationError(result, method, url);
-  };
+      throw new ResponseValidationError(result, method, url);
+    };
 
 /**
  * FastifyPluginCallbackZod with Zod automatic type inference
